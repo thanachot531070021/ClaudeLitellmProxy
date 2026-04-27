@@ -1,99 +1,113 @@
 # Claude Code OTel Monitoring — Deploy บน Railway
 
-## ไฟล์ในโปรเจกต์นี้
+## โครงสร้างไฟล์
 ```
-claude-otel-monitoring/
-├── docker-compose.yml          — services ทั้งหมด (OTel + PostgreSQL + Grafana)
-├── otel-config.yaml            — OTel Collector config
-├── init.sql                    — Database schema (สร้างตารางอัตโนมัติ)
-├── .env.example                — ตัวอย่าง environment variables
-├── employee_settings.json      — config แจกพนักงาน (แก้ค่าก่อนแจก)
+├── Dockerfile              — OTel Collector (embed config ไว้แล้ว)
+├── railway.toml            — Railway build config
+├── otel-config.yaml        — OTel Collector config
+├── docker-compose.yml      — สำหรับ run local เท่านั้น
+├── init.sql                — Database schema
+├── .env.example            — ตัวอย่าง environment variables
+├── employee_settings.json  — config แจกพนักงาน
 └── grafana/provisioning/
     └── datasources/
-        └── datasource.yaml     — Grafana เชื่อม PostgreSQL อัตโนมัติ
+        └── datasource.yaml
 ```
 
 ---
 
-## STEP 1 — อัปโหลดขึ้น GitHub
+## Deploy บน Railway (3 services แยกกัน)
 
-สร้าง repo ใหม่ใน GitHub แล้วอัปไฟล์ทั้งหมดขึ้นไป
-
----
-
-## STEP 2 — สร้าง Railway Project
-
-1. ไปที่ https://railway.app → Login ด้วย GitHub
-2. กด **New Project** → **Deploy from GitHub repo**
-3. เลือก repo ที่สร้าง
-4. Railway จะ detect docker-compose.yml อัตโนมัติ
+Railway ไม่รองรับ docker-compose จาก GitHub โดยตรง ต้องสร้างแต่ละ service แยก
 
 ---
 
-## STEP 3 — ตั้ง Environment Variables
+### SERVICE 1 — OTel Collector (จาก GitHub repo นี้)
 
-ใน Railway → Service → **Variables** → เพิ่ม:
-
+1. ไป [railway.app](https://railway.app) → **New Project** → **Empty Project**
+2. กด **+ New** → **GitHub Repo** → เลือก repo นี้
+3. Railway จะ detect `Dockerfile` และ build อัตโนมัติ ✅
+4. ใน **Settings** → **Networking** → Generate Domain
+5. เปิด port `4317` (gRPC) และ `4318` (HTTP) ใน Variables:
 ```
-POSTGRES_USER       = admin
-POSTGRES_PASSWORD   = (ตั้งรหัสแข็งแรง)
-POSTGRES_CONN       = postgresql://admin:(password)@postgres:5432/claude_monitoring
-GRAFANA_USER        = admin
-GRAFANA_PASSWORD    = (ตั้งรหัสแข็งแรง)
+PORT = 4318
+```
+6. จด URL ที่ได้ไว้ เช่น `your-app.up.railway.app`
+
+---
+
+### SERVICE 2 — PostgreSQL
+
+1. ในโปรเจคเดิม กด **+ New** → **Database** → **Add PostgreSQL**
+2. Railway สร้างให้อัตโนมัติ
+3. ไปที่ PostgreSQL service → **Variables** → copy `DATABASE_URL`
+4. รัน init.sql ใน **Data** tab หรือผ่าน psql:
+```bash
+psql $DATABASE_URL < init.sql
 ```
 
 ---
 
-## STEP 4 — Deploy และรอ
+### SERVICE 3 — Grafana
 
-Railway จะ build และ start ทุก service อัตโนมัติ
-รอ 2-3 นาที แล้วดู URL ที่ได้จาก Railway
+1. กด **+ New** → **Docker Image**
+2. ใส่ image: `grafana/grafana:latest`
+3. ใน **Variables** เพิ่ม:
+```
+GF_SECURITY_ADMIN_USER         = admin
+GF_SECURITY_ADMIN_PASSWORD     = (ตั้งรหัสแข็งแรง)
+GF_USERS_ALLOW_SIGN_UP         = false
+GF_DATABASE_TYPE               = postgres
+GF_DATABASE_HOST               = (postgres host จาก Railway)
+GF_DATABASE_NAME               = railway
+GF_DATABASE_USER               = postgres
+GF_DATABASE_PASSWORD           = (postgres password)
+GF_SERVER_ROOT_URL             = https://(grafana-url).up.railway.app
+```
+4. ใน **Settings** → **Networking** → Generate Domain → เปิด port `3000`
 
 ---
 
-## STEP 5 — แก้ employee_settings.json แล้วแจกพนักงาน
+## ตั้ง Grafana Datasource
 
-แก้ไข 2 จุด:
-1. `YOUR-APP.up.railway.app` → URL จริงจาก Railway
-2. `EMPLOYEE_EMAIL@company.com` → email พนักงานแต่ละคน
+1. เปิด Grafana → **Connections** → **Data Sources** → **Add**
+2. เลือก **PostgreSQL**
+3. ใส่:
+   - Host: `(postgres host จาก Railway):5432`
+   - Database: `railway`
+   - User/Password: ตามที่ตั้งไว้
+   - TLS: disable
+
+---
+
+## แก้ employee_settings.json แล้วแจกพนักงาน
+
+แก้ 3 จุด:
+1. `YOUR-APP.up.railway.app` → URL ของ OTel Collector จาก Railway
+2. `EMPLOYEE_EMAIL@company.com` → email พนักงาน
 3. `DEPARTMENT_NAME` → ชื่อแผนก
 
-พนักงานนำไฟล์นี้ไปวางที่:
+พนักงานนำไปวางที่:
 - Mac/Linux: `~/.claude/settings.json`
 - Windows: `%APPDATA%\Claude\settings.json`
 
-แค่นี้เอง! Claude Code จะส่งข้อมูลมาที่ collector ทันทีที่เปิดใช้งาน
-
 ---
 
-## STEP 6 — เข้า Grafana Dashboard
-
-เปิด browser ไปที่:
-```
-https://YOUR-APP.up.railway.app:3000
-```
-
-Login: admin / (GRAFANA_PASSWORD ที่ตั้งไว้)
-
----
-
-## ทดสอบว่าระบบทำงาน
+## Run Local (ใช้ docker-compose)
 
 ```bash
-# เช็ค OTel Collector
-curl https://YOUR-APP.up.railway.app:4318/v1/metrics
-
-# เช็คจาก Claude Code (รันในเครื่องพนักงานที่ตั้ง settings แล้ว)
-claude --version
-# แล้วลองใช้ claude code สักคำสั่ง → ดูใน Grafana ว่ามีข้อมูลเข้ามา
+cp .env.example .env
+# แก้ .env ให้ครบ
+docker-compose up -d
 ```
+
+Grafana: http://localhost:3000
 
 ---
 
-## ถ้าใช้ Sophos MDM
+## ทดสอบ OTel Collector
 
-push ไฟล์ managed_settings ไปที่เครื่องพนักงานทุกเครื่อง:
-- Mac: `/Library/Application Support/Claude/managed_settings.json`
-- Windows: `C:\ProgramData\Claude\managed_settings.json`
-
-พนักงานแก้ไขไม่ได้ และ OTel จะเปิดอัตโนมัติทุกเครื่อง
+```bash
+curl https://YOUR-OTEL-URL.up.railway.app/v1/metrics
+# ควรได้ response (อาจ 405 Method Not Allowed = ทำงานปกติ)
+```

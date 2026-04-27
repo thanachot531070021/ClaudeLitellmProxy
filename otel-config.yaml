@@ -33,8 +33,7 @@ exporters:
     tls:
       insecure: true
 
-  # Log ออก console ด้วย (debug)
-  logging:
+  debug:
     verbosity: basic
     sampling_initial: 5
     sampling_thereafter: 200
@@ -52,14 +51,14 @@ service:
     metrics:
       receivers: [otlp]
       processors: [batch, resource]
-      exporters: [prometheus, logging]
+      exporters: [prometheus, debug]
 
     logs:
       receivers: [otlp]
       processors: [batch, resource]
-      exporters: [logging]
+      exporters: [debug]
 
     traces:
       receivers: [otlp]
       processors: [batch, resource]
-      exporters: [logging]
+      exporters: [debug]

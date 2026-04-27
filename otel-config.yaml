@@ -1,0 +1,65 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 100
+
+  # เพิ่ม resource attributes ให้ทุก record
+  resource:
+    attributes:
+      - key: service.name
+        value: claude-code
+        action: upsert
+
+  # กรองเฉพาะ Claude Code metrics
+  filter/claude:
+    metrics:
+      include:
+        match_type: regexp
+        metric_names:
+          - "claude_code.*"
+
+exporters:
+  # ส่งเข้า PostgreSQL ผ่าน otlp-http (ใช้ receiver อีกตัว)
+  otlp/postgres:
+    endpoint: http://localhost:4318
+    tls:
+      insecure: true
+
+  # Log ออก console ด้วย (debug)
+  logging:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # Prometheus endpoint สำหรับ Grafana scrape
+  prometheus:
+    endpoint: "0.0.0.0:9464"
+    namespace: claude
+    send_timestamps: true
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [prometheus, logging]
+
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [logging]
+
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [logging]

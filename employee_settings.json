@@ -1,0 +1,13 @@
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://YOUR-APP.up.railway.app",
+    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
+    "OTEL_LOGS_EXPORT_INTERVAL": "5000",
+
+    "OTEL_RESOURCE_ATTRIBUTES": "user.email=EMPLOYEE_EMAIL@company.com,department=DEPARTMENT_NAME,service.name=claude-code"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8080",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
+    "OTEL_LOGS_EXPORT_INTERVAL": "5000",
+    "OTEL_RESOURCE_ATTRIBUTES": "user.email=thanachot531070021@gmail.com,department=IT,service.name=claude-code"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(docker exec *)",
+      "PowerShell(docker exec claudelitellmproxy-proxy-1 ls /logs)",
+      "PowerShell(if \\(-not $?\\) { \"Empty or not found\" })",
+      "PowerShell(docker exec claudelitellmproxy-proxy-1 find /logs -type f 2>&1)",
+      "PowerShell(Get-Content \"$env:USERPROFILE\\\\.claude\\\\settings.json\" 2>&1)",
+      "PowerShell([System.Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_BASE_URL\", \"User\"\\); [System.Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_BASE_URL\", \"Machine\"\\))",
+      "Read(//c/Users/Thanachat_J/.claude/**)",
+      "Bash(npm install *)",
+      "Bash(node server.js)",
+      "Bash(curl -s http://localhost:3737/api/stats)",
+      "Bash(curl -s http://localhost:3737/api/projects)",
+      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\([{'name':p['name'],'sessions':p['sessionCount'],'msgs':p['totalMessages']} for p in d], ensure_ascii=False, indent=2\\)\\)\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); j.forEach\\(p=>console.log\\(p.name, p.sessionCount, p.totalMessages\\)\\)\")",
+      "Bash(curl -s \"http://localhost:3737/api/history?limit=3\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:4318/)",
+      "Read(//c/Users/Thanachat_J/AppData/Roaming/Claude/**)",
+      "Bash(curl -s -X POST http://localhost:4318/v1/logs -H 'Content-Type: application/json' -d '{\"resourceLogs\":[]}' -w '\\\\nHTTP: %{http_code}')"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Thanachat_J\\.claude"
+    ]
+  },
+  "alwaysThinkingEnabled": true
+}

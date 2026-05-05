@@ -1,0 +1,12 @@
+FROM python:3.12-slim
+RUN pip install --no-cache-dir mitmproxy python-dotenv
+WORKDIR /app
+COPY mitm_addon.py .
+VOLUME ["/certs", "/logs"]
+EXPOSE 8081
+CMD ["mitmdump", \
+     "-s", "mitm_addon.py", \
+     "--listen-port", "8081", \
+     "--listen-host", "0.0.0.0", \
+     "--set", "confdir=/certs", \
+     "-q"]

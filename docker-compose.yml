@@ -1,6 +1,7 @@
 services:
 
   # Proxy — ดัก prompt + response แล้วเขียนลง logs.jsonl ก่อนส่งต่อ Anthropic
+  # ใช้กับ: Claude Code CLI, VS Code (ตั้ง ANTHROPIC_BASE_URL)
   proxy:
     build:
       context: .
@@ -10,11 +11,31 @@ services:
       - CF_WORKER_URL=https://claude-prompt-logger.cloudflare-training3.workers.dev
       - CF_WORKER_SECRET=${CF_WORKER_SECRET}
       - CLAUDE_USER_SETTINGS=/etc/claude-user-settings.json
+      - CERTS_DIR=/certs
     volumes:
       - ./logs:/logs
+      - ./certs:/certs:ro
       - ${CLAUDE_SETTINGS_PATH}:/etc/claude-user-settings.json:ro
     ports:
       - "8080:8080"
+    restart: unless-stopped
+
+  # mitmproxy — ดัก HTTPS traffic ระดับ network สำหรับ Claude Desktop
+  # พนักงานตั้ง system proxy → <server_ip>:8081 และ install cert จาก http://<server_ip>:8080/cert
+  mitmproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.mitm
+    environment:
+      - CF_WORKER_URL=https://claude-prompt-logger.cloudflare-training3.workers.dev
+      - CF_WORKER_SECRET=${CF_WORKER_SECRET}
+      - LOG_DIR=/logs
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./logs:/logs
+      - ./certs:/certs
+    ports:
+      - "8081:8081"
     restart: unless-stopped
 
   # OTel Collector — รับ telemetry (token metrics) จาก Claude Code

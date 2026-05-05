@@ -2,3 +2,7 @@ anthropic>=0.50.0
 fastapi>=0.115.0
 httpx>=0.28.0
 uvicorn[standard]>=0.34.0
+python-dotenv>=1.0.0
+
+# สำหรับ mitm_addon.py (Claude Desktop support) — ติดตั้งแยกบนเครื่องพนักงาน
+# pip install mitmproxy>=10.0.0

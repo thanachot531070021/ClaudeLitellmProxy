@@ -33,7 +33,8 @@
       "Bash(docker compose up *)",
       "PowerShell(.\\\\setup-employee.ps1 -ProxyUrl \"http://localhost:8080\" -Email \"thanachot531070021@gmail.com\" -Department \"IT\")",
       "Bash(docker compose *)",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:d[k] for k in ['timestamp','account','account_email','ip_address','model','prompt'] if k in d}, ensure_ascii=False, indent=2\\)\\)\")"
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:d[k] for k in ['timestamp','account','account_email','ip_address','model','prompt'] if k in d}, ensure_ascii=False, indent=2\\)\\)\")",
+      "Bash(python3 -c \"import sys,json; [print\\(json.dumps\\(json.loads\\(l\\), indent=2, ensure_ascii=False\\)\\) for l in sys.stdin]\")"
     ]
   }
 }

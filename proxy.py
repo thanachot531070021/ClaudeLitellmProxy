@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ LOG_FILE = str(_BASE_DIR / _raw_log) if not os.path.isabs(_raw_log) else _raw_lo
 CF_WORKER_URL    = os.getenv("CF_WORKER_URL", "").rstrip("/")
 CF_WORKER_SECRET = os.getenv("CF_WORKER_SECRET", "")
 EMPLOYEE_CWD     = os.getenv("EMPLOYEE_CWD", "")
+CERTS_DIR        = os.getenv("CERTS_DIR", "/certs")
 UPSTREAM         = "https://api.anthropic.com"
 
 
@@ -55,7 +57,35 @@ def _load_account_email() -> str:
 
 
 ACCOUNT_EMAIL = _load_account_email()
+HOSTNAME = socket.gethostname()
 logger.info("ACCOUNT_EMAIL loaded: %s", ACCOUNT_EMAIL or "(none)")
+logger.info("HOSTNAME: %s", HOSTNAME)
+
+# Pricing USD / 1M tokens
+_PRICE = {
+    "opus":   dict(inp=15,    out=75,   cr=1.50,  cw=18.75),
+    "sonnet": dict(inp=3,     out=15,   cr=0.30,  cw=3.75),
+    "haiku":  dict(inp=0.80,  out=4,    cr=0.08,  cw=1.00),
+}
+
+def _calc_cost(model: str, inp: int, out: int, cr: int, cw: int) -> float:
+    tier = "opus" if "opus" in model else "haiku" if "haiku" in model else "sonnet"
+    p = _PRICE[tier]
+    return (inp * p["inp"] + out * p["out"] + cr * p["cr"] + cw * p["cw"]) / 1_000_000
+
+
+def _detect_client(headers: dict) -> str:
+    ua   = str(headers.get("user-agent",            "")).lower()
+    name = str(headers.get("anthropic-client-name", "")).lower()
+    app  = str(headers.get("x-app",                 "")).lower()
+    if "claude-code" in name or "claude-code" in ua or "claude-code" in app:
+        return "claude-code"
+    if "vscode" in ua or "vscode" in name:
+        return "vscode"
+    if "electron" in ua or "claude" in ua or "anthropic" in ua:
+        return "claude-desktop"
+    return "api"
+
 
 # connection/keep-alive ต้องไม่ forward ไป upstream (HTTP hop-by-hop headers)
 SKIP_HEADERS = {
@@ -211,18 +241,25 @@ def parse_sse_log(session_id: str, body: dict, raw: bytes, meta: dict):
         elif t == "message_delta":
             output_tokens = data.get("usage", {}).get("output_tokens", 0)
 
+    model = body.get("model", "")
+    total = input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens
     write_log(session_id, {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "client": meta.get("client", "api"),
+        "machine_name": HOSTNAME,
         "account": meta.get("account", ""),
         "account_email": ACCOUNT_EMAIL,
         "ip_address": meta.get("ip_address", ""),
         "source": meta.get("source", ""),
-        "model": body.get("model"),
+        "model": model,
         "status_code": 200,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_creation_input_tokens": cache_creation_input_tokens,
         "cache_read_input_tokens": cache_read_input_tokens,
+        "total_tokens": total,
+        "cost_usd": _calc_cost(model, input_tokens, output_tokens,
+                               cache_read_input_tokens, cache_creation_input_tokens),
         "prompt": extract_prompt_text(body.get("messages", [])),
         "response": "".join(response_parts),
     })
@@ -237,6 +274,24 @@ class UsageRequest(BaseModel):
     machine_name: str
     account_email: str
     session_id: str
+
+
+@app.get("/cert")
+async def download_cert():
+    """ให้พนักงาน download mitmproxy CA cert ไปติดตั้งบนเครื่อง"""
+    cert_path = os.path.join(CERTS_DIR, "mitmproxy-ca-cert.pem")
+    if not os.path.exists(cert_path):
+        return Response(
+            content="Certificate not found. Start the mitmproxy service first.",
+            status_code=404,
+        )
+    with open(cert_path, "rb") as f:
+        content = f.read()
+    return Response(
+        content=content,
+        media_type="application/x-x509-ca-cert",
+        headers={"Content-Disposition": "attachment; filename=claude-monitor-ca.crt"},
+    )
 
 
 @app.post("/api/prompt")
@@ -273,12 +328,13 @@ async def proxy(path: str, request: Request):
         "account": _get_account(request),
         "ip_address": _get_client_ip(request),
         "source": request.headers.get("user-agent", ""),
+        "client": _detect_client(dict(request.headers)),
     }
 
     logger.info(
-        "REQUEST path=%s stream=%s model=%s account=%s ip=%s",
+        "REQUEST path=%s stream=%s model=%s account=%s ip=%s client=%s",
         path, is_streaming, body.get("model"),
-        meta["account"], meta["ip_address"],
+        meta["account"], meta["ip_address"], meta["client"],
     )
 
     # สร้าง session_id ต่อ 1 request และส่ง prompt ไป Worker ทันที
@@ -370,18 +426,27 @@ async def proxy(path: str, request: Request):
             response_text = " ".join(
                 c.get("text", "") for c in content if c.get("type") == "text"
             )
+            mdl = body.get("model", "")
+            inp = usage.get("input_tokens", 0)
+            out = usage.get("output_tokens", 0)
+            cw  = usage.get("cache_creation_input_tokens", 0)
+            cr  = usage.get("cache_read_input_tokens", 0)
             write_log(session_id, {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "client": meta["client"],
+                "machine_name": HOSTNAME,
                 "account": meta["account"],
                 "account_email": ACCOUNT_EMAIL,
                 "ip_address": meta["ip_address"],
                 "source": meta["source"],
-                "model": body.get("model"),
+                "model": mdl,
                 "status_code": r.status_code,
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
-                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
-                "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+                "input_tokens": inp,
+                "output_tokens": out,
+                "cache_creation_input_tokens": cw,
+                "cache_read_input_tokens": cr,
+                "total_tokens": inp + out + cw + cr,
+                "cost_usd": _calc_cost(mdl, inp, out, cr, cw),
                 "prompt": extract_prompt_text(body.get("messages", [])),
                 "response": response_text,
             })

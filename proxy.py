@@ -2,13 +2,21 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+
+# โหลด .env จาก directory เดียวกับ proxy.py เสมอ ไม่ว่าจะ start จากที่ไหน
+_BASE_DIR = Path(__file__).parent
+load_dotenv(_BASE_DIR / ".env")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,11 +28,34 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-LOG_FILE         = os.getenv("LOG_FILE", "/logs/proxy-logs.jsonl")
+# ถ้า LOG_FILE เป็น relative path ให้ resolve จาก directory ของ proxy.py
+_raw_log = os.getenv("LOG_FILE", "logs/proxy-logs.jsonl")
+LOG_FILE = str(_BASE_DIR / _raw_log) if not os.path.isabs(_raw_log) else _raw_log
 CF_WORKER_URL    = os.getenv("CF_WORKER_URL", "").rstrip("/")
 CF_WORKER_SECRET = os.getenv("CF_WORKER_SECRET", "")
 EMPLOYEE_CWD     = os.getenv("EMPLOYEE_CWD", "")
 UPSTREAM         = "https://api.anthropic.com"
+
+
+def _load_account_email() -> str:
+    path = os.getenv("CLAUDE_USER_SETTINGS", "")
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            s = json.load(f)
+        attrs = s.get("env", {}).get("OTEL_RESOURCE_ATTRIBUTES", "")
+        for part in attrs.split(","):
+            part = part.strip()
+            if part.startswith("user.email="):
+                return part.split("=", 1)[1]
+    except Exception as e:
+        logger.warning("_load_account_email failed: %s", e)
+    return ""
+
+
+ACCOUNT_EMAIL = _load_account_email()
+logger.info("ACCOUNT_EMAIL loaded: %s", ACCOUNT_EMAIL or "(none)")
 
 # connection/keep-alive ต้องไม่ forward ไป upstream (HTTP hop-by-hop headers)
 SKIP_HEADERS = {
@@ -34,7 +65,30 @@ SKIP_HEADERS = {
 }
 
 
-async def _push_prompt(session_id: str, prompt: str):
+def _get_client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+def _mask_api_key(key: str) -> str:
+    if not key or len(key) <= 8:
+        return "***" if key else ""
+    return key[:8] + "..." + key[-4:]
+
+
+def _get_account(request: Request) -> str:
+    key = request.headers.get("x-api-key", "")
+    if key:
+        return _mask_api_key(key)
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return _mask_api_key(auth[7:])
+    return ""
+
+
+async def _push_prompt(session_id: str, prompt: str, meta: dict):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(
@@ -45,6 +99,9 @@ async def _push_prompt(session_id: str, prompt: str):
                     "char_count": len(prompt),
                     "approx_tokens": max(1, int(len(prompt) / 3.5)),
                     "prompt": prompt,
+                    "account": meta.get("account", ""),
+                    "ip_address": meta.get("ip_address", ""),
+                    "source": meta.get("source", ""),
                 },
                 headers={"X-Api-Key": CF_WORKER_SECRET},
             )
@@ -84,12 +141,15 @@ def write_log(session_id: str, entry: dict):
         logger.error("write_log failed: %s", e)
 
     logger.info(
-        "USAGE model=%s input=%s output=%s cache_create=%s cache_read=%s",
+        "USAGE account=%s ip=%s model=%s input=%s output=%s cache_create=%s cache_read=%s source=%s",
+        entry.get("account", ""),
+        entry.get("ip_address", ""),
         entry.get("model"),
         entry.get("input_tokens"),
         entry.get("output_tokens"),
         entry.get("cache_creation_input_tokens", 0),
         entry.get("cache_read_input_tokens", 0),
+        entry.get("source", ""),
     )
 
     if CF_WORKER_URL:
@@ -104,21 +164,23 @@ def write_log(session_id: str, entry: dict):
 
 
 def extract_prompt_text(messages: list) -> str:
-    parts = []
-    for m in messages:
-        role = m.get("role", "")
-        content = m.get("content", "")
-        if isinstance(content, str):
-            parts.append(f"[{role}] {content}")
-        elif isinstance(content, list):
-            text = " ".join(
-                c.get("text", "") for c in content if c.get("type") == "text"
-            )
-            parts.append(f"[{role}] {text}")
-    return "\n".join(parts)
+    # เอาเฉพาะ user message ล่าสุด ตัด tag ที่ inject โดยระบบออก
+    last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+    if not last_user:
+        return ""
+
+    content = last_user.get("content", "")
+    if isinstance(content, list):
+        text = " ".join(c.get("text", "") for c in content if c.get("type") == "text")
+    else:
+        text = content
+
+    # ลบ XML tags ที่ Claude Code inject (<system-reminder>, <ide_opened_file>, etc.)
+    text = re.sub(r"<[a-zA-Z_][^>]*>.*?</[a-zA-Z_][^>]*>", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
-def parse_sse_log(session_id: str, body: dict, raw: bytes):
+def parse_sse_log(session_id: str, body: dict, raw: bytes, meta: dict):
     input_tokens = 0
     output_tokens = 0
     cache_creation_input_tokens = 0
@@ -151,7 +213,12 @@ def parse_sse_log(session_id: str, body: dict, raw: bytes):
 
     write_log(session_id, {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "account": meta.get("account", ""),
+        "account_email": ACCOUNT_EMAIL,
+        "ip_address": meta.get("ip_address", ""),
+        "source": meta.get("source", ""),
         "model": body.get("model"),
+        "status_code": 200,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_creation_input_tokens": cache_creation_input_tokens,
@@ -159,6 +226,29 @@ def parse_sse_log(session_id: str, body: dict, raw: bytes):
         "prompt": extract_prompt_text(body.get("messages", [])),
         "response": "".join(response_parts),
     })
+
+
+class PromptRequest(BaseModel):
+    machine_name: str
+    account_email: str
+
+
+class UsageRequest(BaseModel):
+    machine_name: str
+    account_email: str
+    session_id: str
+
+
+@app.post("/api/prompt")
+async def api_prompt(payload: PromptRequest):
+    logger.info("api_prompt machine=%s email=%s", payload.machine_name, payload.account_email)
+    return JSONResponse({"status": "ok", "machine_name": payload.machine_name, "account_email": payload.account_email})
+
+
+@app.post("/api/usage")
+async def api_usage(payload: UsageRequest):
+    logger.info("api_usage machine=%s email=%s session=%s", payload.machine_name, payload.account_email, payload.session_id)
+    return JSONResponse({"status": "ok", "machine_name": payload.machine_name, "account_email": payload.account_email, "session_id": payload.session_id})
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -179,13 +269,23 @@ async def proxy(path: str, request: Request):
     is_messages = path.rstrip("/") == "v1/messages"
     is_streaming = body.get("stream", False) if is_messages else False
 
-    logger.info("REQUEST path=%s stream=%s model=%s", path, is_streaming, body.get("model"))
+    meta = {
+        "account": _get_account(request),
+        "ip_address": _get_client_ip(request),
+        "source": request.headers.get("user-agent", ""),
+    }
+
+    logger.info(
+        "REQUEST path=%s stream=%s model=%s account=%s ip=%s",
+        path, is_streaming, body.get("model"),
+        meta["account"], meta["ip_address"],
+    )
 
     # สร้าง session_id ต่อ 1 request และส่ง prompt ไป Worker ทันที
     session_id = str(uuid.uuid4())
     if is_messages and CF_WORKER_URL:
         prompt_text = extract_prompt_text(body.get("messages", []))
-        asyncio.create_task(_push_prompt(session_id, prompt_text))
+        asyncio.create_task(_push_prompt(session_id, prompt_text, meta))
 
     if is_messages and is_streaming:
         client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
@@ -219,14 +319,14 @@ async def proxy(path: str, request: Request):
                     yield chunk
                 if raw:
                     try:
-                        parse_sse_log(session_id, body, bytes(raw))
+                        parse_sse_log(session_id, body, bytes(raw), meta)
                     except Exception as e:
                         logger.error("parse_sse_log error: %s", e)
             except asyncio.CancelledError:
                 logger.warning("Client disconnected during streaming")
                 if raw:
                     try:
-                        parse_sse_log(session_id, body, bytes(raw))
+                        parse_sse_log(session_id, body, bytes(raw), meta)
                     except Exception:
                         pass
                 raise
@@ -262,9 +362,9 @@ async def proxy(path: str, request: Request):
 
     logger.info("UPSTREAM status=%s", r.status_code)
 
-    if is_messages and r.status_code == 200:
+    if is_messages:
         try:
-            resp_json = r.json()
+            resp_json = r.json() if r.status_code == 200 else {}
             usage = resp_json.get("usage", {})
             content = resp_json.get("content", [])
             response_text = " ".join(
@@ -272,9 +372,14 @@ async def proxy(path: str, request: Request):
             )
             write_log(session_id, {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "account": meta["account"],
+                "account_email": ACCOUNT_EMAIL,
+                "ip_address": meta["ip_address"],
+                "source": meta["source"],
                 "model": body.get("model"),
-                "input_tokens": usage.get("input_tokens"),
-                "output_tokens": usage.get("output_tokens"),
+                "status_code": r.status_code,
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
                 "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
                 "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
                 "prompt": extract_prompt_text(body.get("messages", [])),

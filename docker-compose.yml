@@ -9,8 +9,10 @@ services:
       - LOG_FILE=/logs/proxy-logs.jsonl
       - CF_WORKER_URL=https://claude-prompt-logger.cloudflare-training3.workers.dev
       - CF_WORKER_SECRET=${CF_WORKER_SECRET}
+      - CLAUDE_USER_SETTINGS=/etc/claude-user-settings.json
     volumes:
       - ./logs:/logs
+      - ${CLAUDE_SETTINGS_PATH}:/etc/claude-user-settings.json:ro
     ports:
       - "8080:8080"
     restart: unless-stopped

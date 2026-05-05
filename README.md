@@ -1,58 +1,85 @@
 # Claude Litellm Proxy
 
-ระบบ proxy + telemetry collector สำหรับ monitor การใช้งาน Claude Code ของพนักงาน ดัก prompt, token usage, และ cost โดยไม่ต้องแก้ไข Claude Code ฝั่งพนักงาน พร้อมส่งข้อมูลขึ้น Cloudflare D1 ผ่าน Worker API แบบ real-time
+ระบบ proxy สำหรับ monitor การใช้งาน Claude Code ของพนักงาน ดัก prompt + token usage โดยไม่ต้องแก้ไข Claude Code ฝั่งพนักงาน ส่งข้อมูลไป Cloudflare D1 ผ่าน Worker API แบบ real-time
+
+---
+
+## Quick Start
+
+```bash
+# 1. Setup
+cp .env.example .env
+# แก้ CF_WORKER_SECRET ให้เป็น key จริงจาก claude-prompt-logger Worker
+
+# 2. Run
+docker compose up --build -d
+
+# 3. Test
+curl -H "X-Api-Key: $(grep CF_WORKER_SECRET .env | cut -d= -f2)" \
+  https://claude-prompt-logger.cloudflare-training3.workers.dev/health
+```
 
 ---
 
 ## สถาปัตยกรรมระบบ
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        เครื่องพนักงาน                             │
-│                                                                  │
-│   Claude Code CLI                                                │
-│       │                                                          │
-│       ├─── API requests ────────────────────────────────────────►│
-│       │    ANTHROPIC_BASE_URL=http://<server>:8080               │
-│       │                                                          │
-│       └─── OTel telemetry ──────────────────────────────────────►│
-│            OTEL_EXPORTER_OTLP_ENDPOINT=http://<server>:4318      │
-└──────────────────────────────────────────────────────────────────┘
-                          │                       │
-              ┌───────────┘                       └──────────────┐
-              ▼                                                  ▼
-┌──────────────────────────────┐       ┌────────────────────────────────┐
-│  proxy  (port 8080)          │       │  otel-collector (port 4317/18) │
-│                              │       │                                │
-│  1. รับ request              │       │  รับ metrics + logs            │
-│  2. POST /api/prompt ───────►│──────►│  CF Worker                     │
-│  3. forward → Anthropic      │       │  POST /ingest/otel ────────────►
-│  4. stream response กลับ    │       │                                │
-│  5. POST /api/usage ────────►│──────►│  CF Worker                     │
-│  6. เขียน proxy-logs.jsonl   │       │  เขียน otel-logs.jsonl         │
-└──────────────────────────────┘       └────────────────────────────────┘
-         │              │                              │
-         ▼              ▼                              ▼
-  api.anthropic   Cloudflare D1              Cloudflare D1
-                  (prompt_logs)              (via /ingest/otel)
-                  (usage_logs)
+┌──────────────────────────────────────────────────┐
+│           เครื่องพนักงาน                          │
+│                                                 │
+│  Claude Code CLI                                 │
+│      │ POST /v1/messages                         │
+│      │ ANTHROPIC_BASE_URL=http://<server>:8080   │
+│      └──────────────────────────────────────────►
+└──────────────────────────────────────────────────┘
+                     ▲
+                     │ SSE stream response
+                     │
+           ┌─────────┴──────────┐
+           │                    │
+           ▼                    ▼
+    proxy:8080            (local files)
+    ┌──────────────────────────────────┐
+    │ 1. รับ request → generate UUID    │
+    │ 2. POST /api/prompt              │
+    │    (ก่อน Anthropic ตอบ)          │
+    │ 3. stream → Anthropic            │
+    │ 4. parse SSE → get tokens        │
+    │ 5. POST /api/usage               │
+    │    (พร้อม token ครบ)             │
+    │ 6. เขียน proxy-logs.jsonl (backup)
+    └──────────────────┬──────────────────┘
+                       │
+                       │ POST /api/prompt
+                       │ POST /api/usage
+                       │
+                       ▼
+      ┌────────────────────────────────┐
+      │ Cloudflare Worker              │
+      │ claude-prompt-logger           │
+      │ https://...workers.dev         │
+      │                                │
+      │ D1: prompt-logger              │
+      │ - prompt_logs (2 columns)      │
+      │ - usage_logs (8 columns)       │
+      └────────────────────────────────┘
 ```
 
-### Data Flow สำหรับ 1 request
+### Data Flow สำหรับ 1 Prompt Request
 
 ```
-1. พนักงานพิมพ์ prompt ใน Claude Code
-2. Claude Code ส่ง POST /v1/messages → proxy:8080
-3. proxy generate session_id (UUID) สำหรับ request นี้
-4. proxy ส่ง POST /api/prompt ไป CF Worker (fire-and-forget)
-5. proxy forward request ไป api.anthropic.com
-6. Anthropic ส่ง streaming SSE response กลับ
-7. proxy ส่งต่อ stream ให้ Claude Code แบบ real-time
-8. หลัง stream จบ → parse SSE → ได้ tokens ครบ
-9. proxy เขียน proxy-logs.jsonl (local backup)
-10. proxy ส่ง POST /api/usage ไป CF Worker พร้อม token ทุกประเภท
-11. Claude Code ส่ง OTel telemetry → otel-collector:4318
-12. otel-collector เขียน otel-logs.jsonl + ส่ง POST /ingest/otel ไป CF Worker
+1. Claude Code → proxy:8080 POST /v1/messages
+2. proxy สร้าง session_id (UUID)
+3. proxy ส่ง prompt ไป CF Worker → POST /api/prompt (ไม่รอ)
+4. proxy forward request ไป api.anthropic.com
+5. Anthropic ส่ง streaming response (SSE)
+6. proxy stream ต่อให้ Claude Code ทันที
+7. proxy parse SSE events → ได้ tokens ครบ
+8. proxy เขียน proxy-logs.jsonl (local backup)
+9. proxy ส่ง usage ไป CF Worker → POST /api/usage (รอ response)
+10. Worker เก็บ 2 record ลง D1:
+    - prompt_logs.insert({ session_id, prompt, ... })
+    - usage_logs.insert({ session_id, model, tokens, ... })
 ```
 
 ---
@@ -61,24 +88,25 @@
 
 | Item | Value |
 |------|-------|
-| **Worker URL** | `https://claude-prompt-logger.cloudflare-training3.workers.dev` |
-| **Dashboard** | `GET /` |
-| **Auth** | Header `X-Api-Key: <key>` |
-| **D1 Database** | `prompt-logger` |
+| **URL** | `https://claude-prompt-logger.cloudflare-training3.workers.dev` |
+| **Dashboard** | `GET /` (HTML server-rendered) |
+| **Auth** | Header `X-Api-Key: <WORKER_SECRET>` (ดูไฟล์ INTEGRATION.md) |
+| **Database** | D1 `prompt-logger` |
 
-### Endpoints ที่ระบบนี้ใช้
+### API Endpoints
 
-| Endpoint | ส่งจาก | ข้อมูล |
-|----------|--------|--------|
-| `POST /api/prompt` | proxy.py | session_id, cwd, char_count, approx_tokens, prompt |
-| `POST /api/usage` | proxy.py | session_id, model, input/output/cache tokens, total_tokens |
-| `POST /ingest/otel` | otel-collector | OTLP JSON — events + metrics จาก Claude Code |
+| Endpoint | ส่งจาก | ข้อมูล | Response |
+|----------|--------|--------|----------|
+| `POST /api/prompt` | proxy.py | prompt ที่ผู้ใช้พิมพ์ | `{ "ok": true }` |
+| `POST /api/usage` | proxy.py | token usage หลัง model ตอบ | `{ "ok": true }` |
+| `GET /health` | manual test | - | `{ "ok": true }` |
+| `GET /` | browser | - | HTML dashboard (50 items) |
 
 ---
 
 ## Components
 
-### 1. proxy (port 8080)
+### proxy (port 8080)
 
 **ไฟล์:** [proxy.py](proxy.py), [Dockerfile.proxy](Dockerfile.proxy)
 
@@ -98,195 +126,173 @@
 {
   "timestamp": "2026-04-28T10:29:08.391000+00:00",
   "model": "claude-sonnet-4-6",
-  "input_tokens": 3,
-  "output_tokens": 102,
-  "cache_creation_input_tokens": 572,
-  "cache_read_input_tokens": 122560,
-  "prompt": "[user] prompt ของพนักงาน\n[assistant] ...",
-  "response": "คำตอบจาก Claude"
+  "input_tokens": 433,
+  "output_tokens": 13,
+  "cache_creation_input_tokens": 0,
+  "cache_read_input_tokens": 0,
+  "prompt": "สวัสดีครับ คุณคือใคร?",
+  "response": "สวัสดีครับ ฉันคือ Claude AI assistant ที่..."
 }
 ```
 
-### 2. otel-collector (port 4317/4318)
+**Payload ไป CF Worker:**
 
-**ไฟล์:** [otel-config.yaml](otel-config.yaml)
+```json
+// POST /api/prompt (fire-and-forget, ไม่รอ response)
+{
+  "session_id": "ba6b4b4c-f8e3-4915-8d64-5de198e7a09d",
+  "cwd": "C:\\Users\\project",
+  "char_count": 42,
+  "approx_tokens": 12,
+  "prompt": "สวัสดีครับ คุณคือใคร?"
+}
 
-OpenTelemetry Collector รับ telemetry จาก Claude Code CLI โดยตรง ส่งออก 2 ที่พร้อมกัน:
-
-| Exporter | ปลายทาง | ข้อมูล |
-|----------|---------|--------|
-| `file` | `logs/otel-logs.jsonl` | local backup |
-| `otlphttp/worker` | CF Worker `/ingest/otel` | ส่งขึ้น D1 |
-
-**Events ที่ Claude Code ส่งมา:**
-- `claude_code.user_prompt` — ทุกครั้งที่พนักงานส่ง prompt
-- `claude_code.api_request` — ผล API call: model, tokens, cost_usd, duration_ms
-- `claude_code.tool_decision` — approve/deny tool (Bash, Edit, etc.)
-- `claude_code.tool_result` — ผล tool execution
-- `claude_code.cost.usage` / `claude_code.token.usage` — metrics สะสม
-
----
-
-## ไฟล์ในโปรเจกต์
-
-| ไฟล์ | หน้าที่ |
-|------|---------|
-| [proxy.py](proxy.py) | FastAPI proxy + ส่ง log ไป CF Worker |
-| [Dockerfile.proxy](Dockerfile.proxy) | build Docker image สำหรับ proxy |
-| [docker-compose.yml](docker-compose.yml) | รัน proxy + otel-collector |
-| [otel-config.yaml](otel-config.yaml) | config OTel Collector (file + worker exporter) |
-| [.env](.env) | `CF_WORKER_URL` + `CF_WORKER_SECRET` (ไม่ commit) |
-| [.env.example](.env.example) | template สำหรับ `.env` |
-| [requirements.txt](requirements.txt) | Python dependencies |
-| [employee_settings.json](employee_settings.json) | template env vars สำหรับพนักงาน |
-| [INTEGRATION.md](INTEGRATION.md) | คู่มือ CF Worker API ฉบับเต็ม |
-| [DOCKER.md](DOCKER.md) | คู่มือ Docker commands |
-| [logs/proxy-logs.jsonl](logs/proxy-logs.jsonl) | local backup: prompt + token usage |
-| [logs/otel-logs.jsonl](logs/otel-logs.jsonl) | local backup: OTel telemetry |
+// POST /api/usage (รอ response OK)
+{
+  "session_id": "ba6b4b4c-f8e3-4915-8d64-5de198e7a09d",
+  "model": "claude-sonnet-4-6",
+  "input_tokens": 10,
+  "output_tokens": 307,
+  "cache_creation_input_tokens": 114097,
+  "cache_read_input_tokens": 116960,
+  "total_tokens": 231374
+}
+```
 
 ---
 
-## การติดตั้ง (Admin Setup)
+## Environment Variables
 
-### ความต้องการ
+| Variable | ตัวอย่าง | หมายเหตุ |
+|----------|---------|---------|
+| `LOG_FILE` | `/logs/proxy-logs.jsonl` | path ไฟล์ log (ภายใน container) |
+| `CF_WORKER_URL` | `https://claude-prompt-logger.cloudflare-training3.workers.dev` | Worker URL |
+| `CF_WORKER_SECRET` | `Softdebut888` | X-Api-Key value ตั้งใน Worker → Settings → Variables/Secrets |
+| `ANTHROPIC_API_KEY` | `sk-ant-...` | API key ของ Anthropic (ตั้งใน .env หรือ system env) |
 
-- Docker Desktop (หรือ Docker Engine + Compose)
-- Port 8080, 4317, 4318 ต้องเปิด firewall ให้เครื่องพนักงานเข้าถึงได้
-- CF Worker secret จาก Cloudflare Dashboard
+---
 
-### 1. ตั้งค่า .env
+## Setup & Deploy
+
+### 1. สร้างไฟล์ `.env`
 
 ```bash
 cp .env.example .env
-# แก้ไข CF_WORKER_SECRET ให้เป็น key จริง
 ```
 
-```env
-CF_WORKER_URL=https://claude-prompt-logger.cloudflare-training3.workers.dev
-CF_WORKER_SECRET=your-secret-here
-```
+**แก้ไขค่า:**
+- `CF_WORKER_URL` = URL ของ `claude-prompt-logger` Worker
+- `CF_WORKER_SECRET` = key จาก Worker Settings → Variables/Secrets
 
-### 2. Build และรัน
+### 2. Rebuild Docker
 
 ```bash
+docker compose down
 docker compose up --build -d
 ```
 
-### 3. ตรวจสอบ
+### 3. ทดสอบ
 
 ```bash
-docker compose ps
-docker compose logs proxy --tail=20
-# ต้องเห็น: POST /api/prompt → 200 OK
-#           POST /api/usage  → 200 OK
+# เช็ค health
+curl -H "X-Api-Key: $(grep CF_WORKER_SECRET .env | cut -d= -f2)" \
+  https://claude-prompt-logger.cloudflare-training3.workers.dev/health
+
+# ดู logs
+docker compose logs -f proxy
 ```
 
-### 4. ทดสอบ proxy
+### 4. ตั้ง Claude Code
 
-```bash
-curl -X POST http://localhost:8080/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: <ANTHROPIC_KEY>" \
-  -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}'
-```
-
----
-
-## การตั้งค่าฝั่งพนักงาน
-
-Copy จาก [employee_settings.json](employee_settings.json) ไปใส่ใน Claude Code settings:
-
-- **Windows:** `%APPDATA%\Claude\settings.json`
-- **Mac/Linux:** `~/.claude/settings.json`
+ใส่คำสั่งใน `employee_settings.json` ของ Claude Code:
 
 ```json
 {
   "env": {
-    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-    "OTEL_METRICS_EXPORTER": "otlp",
-    "OTEL_LOGS_EXPORTER": "otlp",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://<SERVER_IP>:4318",
-    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-    "OTEL_LOGS_EXPORT_INTERVAL": "5000",
-    "OTEL_RESOURCE_ATTRIBUTES": "user.email=<EMAIL>,department=<DEPT>,service.name=claude-code",
-    "ANTHROPIC_BASE_URL": "http://<SERVER_IP>:8080"
+    "ANTHROPIC_BASE_URL": "http://<server_ip>:8080"
   }
 }
 ```
 
-หลังแก้ไขแล้ว **restart Claude Code** เพื่อให้ค่า env มีผล
+**หรือตั้ง environment variables ใน shell:**
+
+```bash
+export ANTHROPIC_BASE_URL=http://<server_ip>:8080
+```
 
 ---
 
-## การดู Log
+## Files
 
-### Dashboard (real-time)
+| ไฟล์ | รายละเอียด |
+|------|---------|
+| [proxy.py](proxy.py) | FastAPI proxy — รับ + forward + ส่ง log |
+| [Dockerfile.proxy](Dockerfile.proxy) | Python 3.12 slim + FastAPI + httpx |
+| [docker-compose.yml](docker-compose.yml) | 1 service: proxy |
+| [requirements.txt](requirements.txt) | Dependencies: anthropic, fastapi, httpx, uvicorn |
+| [.env.example](.env.example) | Template environment variables |
+| [logs/](logs/) | Volume mount สำหรับ proxy-logs.jsonl |
+| [INTEGRATION.md](INTEGRATION.md) | API docs + D1 schema |
 
-```
-https://claude-prompt-logger.cloudflare-training3.workers.dev
-```
+---
 
-auto-refresh ทุก 60 วินาที แสดง Total Prompts, Sessions, Token breakdown, Model breakdown, Recent Activity
+## ทดสอบ Request
 
-### Docker logs
+### ผ่าน curl
 
 ```bash
-docker compose logs -f proxy
-# ดูสถานะการส่งข้อมูลไป CF Worker แบบ real-time
+# 1. ส่ง prompt
+WORKER_KEY=$(grep CF_WORKER_SECRET .env | cut -d= -f2)
+curl -H "X-Api-Key: $WORKER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"test-1","cwd":"/tmp","char_count":50,"approx_tokens":14,"prompt":"hello"}' \
+  https://claude-prompt-logger.cloudflare-training3.workers.dev/api/prompt
+
+# 2. ส่ง usage
+curl -H "X-Api-Key: $WORKER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"test-1","model":"claude-sonnet-4-6","input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_tokens":150}' \
+  https://claude-prompt-logger.cloudflare-training3.workers.dev/api/usage
+
+# 3. ดูว่า DB มีข้อมูลแล้วหรือยัง
+curl -H "X-Api-Key: $WORKER_KEY" \
+  https://claude-prompt-logger.cloudflare-training3.workers.dev/
 ```
 
-### Local backup files
+### ผ่าน Postman
 
-```bash
-# ดู proxy log real-time
-tail -f logs/proxy-logs.jsonl
-
-# สรุป token + cache usage ต่อ model
-python3 -c "
-import sys, json
-from collections import defaultdict
-totals = defaultdict(lambda: {'in':0,'out':0,'cache_c':0,'cache_r':0,'calls':0})
-for line in open('logs/proxy-logs.jsonl'):
-    e = json.loads(line.strip())
-    m = e.get('model','?')
-    totals[m]['in']      += e.get('input_tokens') or 0
-    totals[m]['out']     += e.get('output_tokens') or 0
-    totals[m]['cache_c'] += e.get('cache_creation_input_tokens') or 0
-    totals[m]['cache_r'] += e.get('cache_read_input_tokens') or 0
-    totals[m]['calls']   += 1
-for m, v in totals.items():
-    print(f'{m}: {v[\"calls\"]} calls | input={v[\"in\"]} output={v[\"out\"]} cache_create={v[\"cache_c\"]} cache_read={v[\"cache_r\"]}')
-"
-```
+ดูไฟล์ [INTEGRATION.md](INTEGRATION.md) สำหรับขั้นตอนอย่างละเอียด
 
 ---
 
 ## Troubleshooting
 
-### CF Worker ได้ 401
+### proxy ส่งข้อมูลแล้ว แต่ Worker ได้ 401 Unauthorized
 
-`CF_WORKER_SECRET` ใน `.env` ผิดหรือยังไม่ได้ set
+**สาเหตุ:** `CF_WORKER_SECRET` ใน `.env` ไม่ถูกต้อง หรือ secret ใน Cloudflare ไม่ได้ตั้ง
+
+**วิธีแก้:**
+1. เปิด Cloudflare Dashboard → Workers → `claude-prompt-logger` → Settings
+2. ลงไปดู **Variables/Secrets** ได้ค่า API key
+3. อัพเดต `.env` ให้เป็นค่านั้น
+4. `docker compose up -d` (restart)
+
+### Proxy logs มีแต่ไม่มีข้อมูล
+
+**สาเหตุ:** Volume `/logs` ไม่มี permission write
+
+**วิธีแก้:**
 ```bash
-# แก้ .env แล้ว restart (ไม่ต้อง rebuild)
-docker compose up -d
+docker compose exec proxy chmod 777 /logs
 ```
 
-### otel-logs.jsonl หายหลังลบ
+### Stream หยุดหรือดำเนินการช้า
 
-```bash
-# truncate แทนการลบ
-> logs/otel-logs.jsonl
-# หรือถ้าลบไปแล้ว ให้ restart
-docker compose restart otel-collector
-```
+**สาเหตุ:** การส่ง `/api/usage` รอ response ค้าง (network issue)
 
-### proxy-logs.jsonl ไม่มีข้อมูล
-
-1. ตรวจ `ANTHROPIC_BASE_URL` ชี้มาที่ proxy ถูกต้อง
-2. ตรวจ port 8080 firewall
-3. `docker compose logs proxy`
+**วิธีแก้:**
+- ลดจำนวน retries (อยู่ที่ 3 ครั้ง)
+- เพิ่ม timeout value ใน proxy.py (ปัจจุบัน 10 วินาที)
 
 ---
 
@@ -296,7 +302,7 @@ docker compose restart otel-collector
 # rebuild หลังแก้ proxy.py
 docker compose up --build -d
 
-# restart อย่างเดียว (แก้ .env หรือ otel-config.yaml)
+# restart อย่างเดียว (แก้ .env)
 docker compose up -d
 
 # หยุดทั้งหมด

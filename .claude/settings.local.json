@@ -1,38 +1,39 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:8080",
-    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-    "OTEL_METRICS_EXPORTER": "otlp",
-    "OTEL_LOGS_EXPORTER": "otlp",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-    "OTEL_LOGS_EXPORT_INTERVAL": "5000",
-    "OTEL_RESOURCE_ATTRIBUTES": "user.email=thanachot531070021@gmail.com,department=IT,service.name=claude-code"
+    "ANTHROPIC_BASE_URL": "http://localhost:8080"
   },
   "permissions": {
     "allow": [
+      "Bash(pip show *)",
+      "PowerShell(py *)",
+      "PowerShell(Receive-Job *)",
+      "Bash(LOG_FILE=/c/web_source/ClaudeLitellmProxy/logs/proxy-logs.jsonl CF_WORKER_URL=\"\" CF_WORKER_SECRET=\"\" EMPLOYEE_CWD=\"test\" py -m uvicorn proxy:app --host 0.0.0.0 --port 8099)",
+      "Bash(echo \"Proxy PID: $!\")",
+      "Bash(curl -s http://localhost:8099/health)",
+      "Bash(LOG_FILE=/c/web_source/ClaudeLitellmProxy/logs/test-proxy-logs.jsonl CF_WORKER_URL=\"\" CF_WORKER_SECRET=\"\" EMPLOYEE_CWD=\"test\" py -m uvicorn proxy:app --host 127.0.0.1 --port 8099 --log-level info)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:8099/)",
+      "Bash(curl -v -X POST http://127.0.0.1:8097/v1/messages -H 'Content-Type: application/json' -H 'x-api-key: sk-ant-test-fake-key-logging-12345' -H 'User-Agent: claude-code/test-1.0' -H 'anthropic-version: 2023-06-01' -d '{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":10,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"Hello test logging\"}]}')",
+      "Bash(python3 -c ' *)",
+      "PowerShell(netstat *)",
+      "Bash(py -c ' *)",
+      "Bash(py *)",
+      "PowerShell(Get-Process *)",
+      "Bash(curl -s http://localhost:8080/ -w \"\\\\nHTTP_STATUS:%{http_code}\")",
+      "PowerShell(Get-NetTCPConnection *)",
+      "Bash(curl -s -X POST http://localhost:8080/v1/messages -H 'Content-Type: application/json' -H 'x-api-key: sk-ant-test-diagcheck' -H 'User-Agent: DiagCheck/1.0' -H 'anthropic-version: 2023-06-01' -d '{\"model\":\"claude-haiku-4-5\",\"max_tokens\":5,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' -w '\\\\nHTTP_STATUS:%{http_code}')",
+      "Bash(python -c \"import sys; lines=sys.stdin.read\\(\\).splitlines\\(\\); [print\\(l\\) for l in lines[-3:]]\")",
+      "Bash(python3 -c \"import sys; lines=sys.stdin.read\\(\\).splitlines\\(\\); [print\\(l\\) for l in lines[-3:]]\")",
       "Bash(docker exec *)",
-      "PowerShell(docker exec claudelitellmproxy-proxy-1 ls /logs)",
-      "PowerShell(if \\(-not $?\\) { \"Empty or not found\" })",
-      "PowerShell(docker exec claudelitellmproxy-proxy-1 find /logs -type f 2>&1)",
-      "PowerShell(Get-Content \"$env:USERPROFILE\\\\.claude\\\\settings.json\" 2>&1)",
-      "PowerShell([System.Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_BASE_URL\", \"User\"\\); [System.Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_BASE_URL\", \"Machine\"\\))",
-      "Read(//c/Users/Thanachat_J/.claude/**)",
-      "Bash(npm install *)",
-      "Bash(node server.js)",
-      "Bash(curl -s http://localhost:3737/api/stats)",
-      "Bash(curl -s http://localhost:3737/api/projects)",
-      "Bash(python -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\([{'name':p['name'],'sessions':p['sessionCount'],'msgs':p['totalMessages']} for p in d], ensure_ascii=False, indent=2\\)\\)\")",
-      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); j.forEach\\(p=>console.log\\(p.name, p.sessionCount, p.totalMessages\\)\\)\")",
-      "Bash(curl -s \"http://localhost:3737/api/history?limit=3\")",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:4318/)",
-      "Read(//c/Users/Thanachat_J/AppData/Roaming/Claude/**)",
-      "Bash(curl -s -X POST http://localhost:4318/v1/logs -H 'Content-Type: application/json' -d '{\"resourceLogs\":[]}' -w '\\\\nHTTP: %{http_code}')"
-    ],
-    "additionalDirectories": [
-      "C:\\Users\\Thanachat_J\\.claude"
+      "PowerShell(docker exec claudelitellmproxy-proxy-1 *)",
+      "Bash(netstat -ano)",
+      "Skill(update-config)",
+      "Bash(curl -s -X POST http://localhost:8080/api/prompt -H 'Content-Type: application/json' -d '{\"machine_name\": \"dev-pc-01\", \"account_email\": \"test@example.com\"}')",
+      "Bash(python -m json.tool)",
+      "Bash(curl *)",
+      "Bash(docker compose up *)",
+      "PowerShell(.\\\\setup-employee.ps1 -ProxyUrl \"http://localhost:8080\" -Email \"thanachot531070021@gmail.com\" -Department \"IT\")",
+      "Bash(docker compose *)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:d[k] for k in ['timestamp','account','account_email','ip_address','model','prompt'] if k in d}, ensure_ascii=False, indent=2\\)\\)\")"
     ]
-  },
-  "alwaysThinkingEnabled": true
+  }
 }
